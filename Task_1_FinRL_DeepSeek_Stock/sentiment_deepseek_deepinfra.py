@@ -11,13 +11,13 @@ openai = OpenAI(
 )
 
 stream = False  # Set to True if you want to stream the response
-model_used = 'sentiment_deepseek'  # Define the model_used variable
+model_used = 'sentiment_update_prompt_deepseek'  # Define the model_used variable
 
-def get_sentiment(symbol, *texts):
+def get_sentiment(symbol, titles, *texts):
     texts = [text for text in texts if text != 0]
     num_text = len(texts)
     print(f"Number of texts: {num_text}")
-    text_content = " ".join([f"### News to Stock Symbol -- {symbol[idx]}: {text}" for idx, text in enumerate(texts)])
+    text_content = " ".join([f"### News to Stock Symbol -- {symbol[idx]}: title - {titles[idx]}- {text}" for idx, text in enumerate(texts)])
 
     # conversation = [
     #     {"role": "system",
@@ -31,16 +31,50 @@ def get_sentiment(symbol, *texts):
     #     {"role": "user", "content": text_content},
     # ]
     
+    # conversation = [
+    #     {"role": "system",
+    #      "content": (
+    #          f"Forget all previous instructions. You are now a financial expert giving investment advice. I'll give you a news summary, {num_text} summarized news will be passed in each time. and you need to answer whether this news is GOOD NEWS or BAD NEWS for the listed company.  Please choose only one option from GOOD NEWS, BAD NEWS, NOT SURE, and do not provide any additional responses. Then convert GOOD NEWS to 2, NOT SURE to 1, and BAD NEWS to 0. Only respond with numbers separated by commas (e.g., '2,1,0')."
+    #      )},
+    #     {"role": "user",
+    #      "content": "News to Stock Symbol -- AAPL: Apple announced record-breaking iPhone sales ### News to Stock Symbol -- AAPL: Apple is being sued for patent infringement ### News to Stock Symbol -- AAPL: Apple will attend CES 2025 but no product is confirmed"},
+    #     {"role": "assistant", "content": "2,0,1"},
+    #     {"role": "user", "content": text_content},
+    # ]
+
+
     conversation = [
         {"role": "system",
-         "content": (
-             f"Forget all previous instructions. You are now a financial expert giving investment advice. I'll give you a news summary, {num_text} summarized news will be passed in each time. and you need to answer whether this news is GOOD NEWS or BAD NEWS for the listed company.  Please choose only one option from GOOD NEWS, BAD NEWS, NOT SURE, and do not provide any additional responses. Then convert GOOD NEWS to 2, NOT SURE to 1, and BAD NEWS to 0. Only respond with numbers separated by commas (e.g., '2,1,0')."
-         )},
+        "content": (
+            f"Forget all previous instructions. You are now a financial analyst specializing in market impact assessment. "
+            f"I'll provide you with {num_text} summarized news articles related to publicly traded companies. "
+            f"Each article consists of a **title** and a **summary** of the news. "
+            f"You must analyze the impact of this news on the company's stock price considering both the title and the summary.\n\n"
+
+            f"For each article, you must determine the potential impact based on the given information.\n\n"
+            
+            f"### **Guidelines:**\n"
+            f"- **2 (GOOD NEWS):** If the news is likely to have a positive impact (e.g., strong earnings report, new product launch, expansion, acquisition, strategic partnership, favorable market conditions).\n"
+            f"- **1 (NOT SURE):** If the impact is uncertain or mixed (e.g., minor regulatory changes, neutral business updates, market speculation, rumors without confirmation).\n"
+            f"- **0 (BAD NEWS):** If the news is likely to have a negative impact (e.g., financial losses, lawsuits, regulatory penalties, major executive departures, economic downturn affecting the sector).\n\n"
+
+            f"### **Special Considerations:**\n"
+            f"- If the title is misleading or does not align with the content, focus on the summary.\n"
+            f"- If the news lacks clear financial impact, categorize it as **NOT SURE (1)**.\n"
+            f"- If the news directly states a financial gain or loss, reflect that in the score.\n"
+            f"- Strictly base your response on the given text. Do not introduce external knowledge.\n\n"
+
+            f"Then, respond with a series of numbers separated by commas (e.g., '2,1,0'). Do not provide any additional text or explanations."
+        )},
+        
         {"role": "user",
-         "content": "News to Stock Symbol -- AAPL: Apple announced record-breaking iPhone sales ### News to Stock Symbol -- AAPL: Apple is being sued for patent infringement ### News to Stock Symbol -- AAPL: Apple will attend CES 2025 but no product is confirmed"},
+        "content": "### News to Stock Symbol -- AAPL: title - Apple Announces Record-Breaking iPhone Sales - Apple announced record-breaking iPhone sales ### News to Stock Symbol -- AAPL: title - Apple Faces Lawsuit Over Patent Dispute - Apple is being sued for patent infringement ### News to Stock Symbol -- AAPL: title - Apple to Attend CES 2025, No Product Confirmed - Apple will attend CES 2025 but no product is confirmed"},
+        
         {"role": "assistant", "content": "2,0,1"},
+        
         {"role": "user", "content": text_content},
     ]
+
 
 
     try:
@@ -83,66 +117,23 @@ def get_sentiment(symbol, *texts):
         sentiments.append(sentiment_value)
     return sentiments
 
-# def process_csv(input_csv_path, output_csv_path, batch_size=5, chunk_size=1000):
-#     start_time = time.time()
-
-#     # Check if the output file exists and load the last processed row
-#     if os.path.exists(output_csv_path):
-#         output_df = pd.read_csv(output_csv_path, 
-#         on_bad_lines='warn',
-#         engine='python'
-# )
-#         last_processed_row = len(output_df)
-#     else:
-#         last_processed_row = 0
-
-#     # Read the CSV file in chunks
-#     chunks = pd.read_csv(input_csv_path, encoding="utf-8", chunksize=chunk_size,
-#     on_bad_lines='warn', 
-#     engine='python'     # Print a warning for each skipped line
-#     )
-
-#     for chunk_number, chunk in enumerate(chunks):
-#         # Skip already processed chunks
-#         if chunk_number * chunk_size < last_processed_row:
-#             continue
-
-#         chunk.columns = chunk.columns.str.capitalize()
-#         if model_used not in chunk.columns:
-#             chunk[model_used] = np.nan
-
-#         for i in range(0, len(chunk), batch_size):
-#             batch = chunk.iloc[i:i + batch_size]
-#             texts = batch['Lsa_summary'].tolist()
-#             symbol = batch['Stock_symbol'].tolist()  # Extract the stock symbol for the current batch
-#             sentiments = get_sentiment(symbol, *texts)
-
-#             for j, sentiment in enumerate(sentiments):
-#                 if i + j < len(chunk):
-#                     chunk.loc[chunk.index[i + j], model_used] = sentiment
-
-#         # Append the processed chunk to the output file
-#         chunk.to_csv(output_csv_path, mode='a', header=not os.path.exists(output_csv_path), index=False)
-
-#     print(f"Process completed in {time.time() - start_time:.2f} seconds.")
-
 
 def process_csv(input_csv_path, output_csv_path, batch_size=5, chunk_size=1000):
     start_time = time.time()
 
     # 추론 대상 심볼 리스트
-    target_symbols = [
-        'AAPL', 'ADBE', 'ADI', 'ADP', 'ADSK', 'AEP', 'ALGN', 'AMAT', 'AMD',
-        'AMGN', 'AMZN', 'ANSS', 'ASML', 'AVGO', 'AZN', 'BIIB', 'BKNG',
-        'BKR', 'CDNS', 'CHTR', 'CMCSA', 'COST', 'CPRT', 'CSCO', 'CSGP',
-        'CSX', 'CTAS', 'CTSH', 'DLTR', 'DXCM', 'EA', 'EBAY', 'ENPH', 'EXC',
-        'FANG', 'FAST', 'FTNT', 'GILD', 'GOOG', 'GOOGL', 'HON', 'IDXX',
-        'ILMN', 'INTC', 'INTU', 'ISRG', 'KDP', 'KLAC', 'LRCX', 'LULU',
-        'MAR', 'MCHP', 'MDLZ', 'MELI', 'META', 'MNST', 'MRVL', 'MSFT',
-        'MU', 'NFLX', 'NVDA', 'NXPI', 'ODFL', 'ON', 'ORLY', 'PANW', 'PAYX',
-        'PCAR', 'PEP', 'QCOM', 'REGN', 'ROST', 'SBUX', 'SIRI', 'SNPS',
-        'TMUS', 'TSLA', 'TXN', 'VRSK', 'VRTX', 'WBA', 'WBD', 'WDAY', 'XEL'
-    ]
+    # target_symbols = [
+    #     'AAPL', 'ADBE', 'ADI', 'ADP', 'ADSK', 'AEP', 'ALGN', 'AMAT', 'AMD',
+    #     'AMGN', 'AMZN', 'ANSS', 'ASML', 'AVGO', 'AZN', 'BIIB', 'BKNG',
+    #     'BKR', 'CDNS', 'CHTR', 'CMCSA', 'COST', 'CPRT', 'CSCO', 'CSGP',
+    #     'CSX', 'CTAS', 'CTSH', 'DLTR', 'DXCM', 'EA', 'EBAY', 'ENPH', 'EXC',
+    #     'FANG', 'FAST', 'FTNT', 'GILD', 'GOOG', 'GOOGL', 'HON', 'IDXX',
+    #     'ILMN', 'INTC', 'INTU', 'ISRG', 'KDP', 'KLAC', 'LRCX', 'LULU',
+    #     'MAR', 'MCHP', 'MDLZ', 'MELI', 'META', 'MNST', 'MRVL', 'MSFT',
+    #     'MU', 'NFLX', 'NVDA', 'NXPI', 'ODFL', 'ON', 'ORLY', 'PANW', 'PAYX',
+    #     'PCAR', 'PEP', 'QCOM', 'REGN', 'ROST', 'SBUX', 'SIRI', 'SNPS',
+    #     'TMUS', 'TSLA', 'TXN', 'VRSK', 'VRTX', 'WBA', 'WBD', 'WDAY', 'XEL'
+    # ]
 
     # Check if the output file exists and load the last processed row
     if os.path.exists(output_csv_path):
@@ -162,13 +153,15 @@ def process_csv(input_csv_path, output_csv_path, batch_size=5, chunk_size=1000):
         chunk.columns = chunk.columns.str.capitalize()
 
         # ✅ 날짜와 심볼 필터 적용
-        if 'Date' not in chunk.columns or 'Stock_symbol' not in chunk.columns or 'Lsa_summary' not in chunk.columns:
+        if 'Date' not in chunk.columns or 'Tic' not in chunk.columns or 'Lsa_summary' not in chunk.columns:
             print(f"필수 컬럼 누락: chunk {chunk_number}")
             continue
 
         chunk['Date'] = pd.to_datetime(chunk['Date'], errors='coerce')
-        chunk = chunk[chunk['Date'] >= pd.Timestamp('2012-01-01', tz='UTC')]
-        chunk = chunk[chunk['Stock_symbol'].isin(target_symbols)]
+        chunk = chunk[chunk['Date'] >= pd.Timestamp('2012-01-01')]
+        # chunk = chunk[chunk['tic'].isin(target_symbols)]
+        # if chunk[model_used].notnull().all():
+            
 
         if chunk.empty:
             continue
@@ -178,10 +171,11 @@ def process_csv(input_csv_path, output_csv_path, batch_size=5, chunk_size=1000):
 
         for i in range(0, len(chunk), batch_size):
             batch = chunk.iloc[i:i + batch_size]
+            titles = chunk['Article_title'].tolist()
             texts = batch['Lsa_summary'].tolist()
-            symbol = batch['Stock_symbol'].tolist()
+            symbol = batch['Tic'].tolist()
             print(f"Symbol: {symbol}")
-            sentiments = get_sentiment(symbol, *texts)
+            sentiments = get_sentiment(symbol, titles, *texts)
 
             for j, sentiment in enumerate(sentiments):
                 if i + j < len(chunk):
@@ -197,7 +191,7 @@ if __name__ == "__main__":
     csv.field_size_limit(10**7)  # <-- 이 줄 추가!
 
     model_path = "base_line_model/Task_1_FinRL_DeepSeek_Stock/data/"
-    input_file_name='nasdaq_exteral_data.csv'
+    input_file_name='nasdaq_news_data.csv'
     input_file = model_path + input_file_name
     output_file= model_used + '_' + input_file_name
     process_csv(input_file, output_file, batch_size=10, chunk_size=10000)

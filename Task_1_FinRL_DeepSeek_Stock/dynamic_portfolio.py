@@ -16,7 +16,49 @@ def cal_gtaa(data, before_asset_dict, portfolio_weight):
         before_asset_dict (dict): 자산별 weight를 저장한 Dictionary입니다.
     """
     data_imp = data.copy()
-    data_imp = data_imp[data_imp["close"] > data_imp["SMA_10m"]]
+    data_imp = data_imp[data_imp["close"] > data_imp["SMA_220"]]
+    data_imp = data_imp.sort_values(by="volume", ascending=False).head(10)
+    weights = {ticker : 1/10 for ticker in data_imp["tic"]}
+    
+    for ticker in weights.keys():
+        before_asset_dict[ticker] += weights[ticker]*portfolio_weight
+    return before_asset_dict
+
+
+def cal_sentiment(data, before_asset_dict, portfolio_weight):
+    """GTAA 코드입니다.
+    day 기준 긍정 뉴스인 주식에 투자하되 volume이 높은 자산 top 10개를 뽑습니다.
+    만약 그 이하라면 남은 weight를 cash에 투자합니다.
+    Args:
+        data : day기준으로 slicing된 데이터입니다
+        before_asset_dict : 자산별 weight를 저장한 Dictionary입니다.
+        portfolio_weight : 전략의 weight입니다.
+    Returns:
+        before_asset_dict (dict): 자산별 weight를 저장한 Dictionary입니다.
+    """
+    data_imp = data.copy()
+    data_imp = data_imp[data_imp["sentiment_weight_5"] > 1]
+    data_imp = data_imp.sort_values(by="volume", ascending=False).head(10)
+    weights = {ticker : 1/10 for ticker in data_imp["tic"]}
+    
+    for ticker in weights.keys():
+        before_asset_dict[ticker] += weights[ticker]*portfolio_weight
+    return before_asset_dict
+
+
+def cal_risk(data, before_asset_dict, portfolio_weight):
+    """GTAA 코드입니다.
+    day 기준 긍정 뉴스인 주식에 투자하되 volume이 높은 자산 top 10개를 뽑습니다.
+    만약 그 이하라면 남은 weight를 cash에 투자합니다.
+    Args:
+        data : day기준으로 slicing된 데이터입니다
+        before_asset_dict : 자산별 weight를 저장한 Dictionary입니다.
+        portfolio_weight : 전략의 weight입니다.
+    Returns:
+        before_asset_dict (dict): 자산별 weight를 저장한 Dictionary입니다.
+    """
+    data_imp = data.copy()
+    data_imp = data_imp[data_imp["risk_weight_5"] < 3]
     data_imp = data_imp.sort_values(by="volume", ascending=False).head(10)
     weights = {ticker : 1/10 for ticker in data_imp["tic"]}
     
@@ -224,7 +266,7 @@ def calculate_rebalancing_investment(today_data, future_data, before_asset_dict,
     total_investment = sum(asset_invest_dict.values())
     backtesting_investment = total_investment - total_transaction_fee + remain_money + remain_invest_money
 
-    return backtesting_investment
+    return backtesting_investment, total_transaction_fee
 
 
 

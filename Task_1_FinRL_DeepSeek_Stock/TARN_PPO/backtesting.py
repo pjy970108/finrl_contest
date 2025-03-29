@@ -51,7 +51,7 @@ def calculate_max_drawdown(returns):
     cumulative_returns = np.cumprod(1 + returns)
     running_max = np.maximum.accumulate(cumulative_returns)
     drawdowns = (cumulative_returns - running_max) / running_max
-    return abs(np.min(drawdowns)) * 100  # 음수값을 절대값으로 변환
+    return abs(np.min(drawdowns)) # 음수값을 절대값으로 변환
     
 
 def calculate_calmar_ratio(returns, annual_factor=12):

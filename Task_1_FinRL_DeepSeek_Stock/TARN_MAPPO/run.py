@@ -12,6 +12,46 @@ import torch
 import numpy as np
 
 
+class EarlyStopping:
+    def __init__(self, patience=10, min_delta=0.0001):
+        """
+        PPO 학습에서 Early Stopping을 수행하는 클래스
+
+        Args:
+            patience (int): 특정 step 동안 value loss가 개선되지 않으면 학습 중단
+            min_delta (float): 손실이 개선되었다고 판단할 최소 변화량
+        """
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = float('inf')  # 초기에는 매우 큰 값
+        self.no_improvement_steps = 0
+        self.early_stop = False
+
+    def check_stop(self, value_loss):
+        """
+        현재 step의 value loss를 확인하고 Early Stopping 여부를 판단
+
+        Args:
+            value_loss (float): 현재 Value Loss
+
+        Returns:
+            bool: Early Stopping 여부 (True면 학습 중단)
+        """
+        # ✅ Value Loss가 개선되었을 경우
+        if value_loss < self.best_loss - self.min_delta:
+            self.best_loss = value_loss
+            self.no_improvement_steps = 0  # 개선되었으므로 초기화
+        else:
+            self.no_improvement_steps += 1  # 개선되지 않으면 증가
+
+        # ✅ 특정 Step 동안 개선이 없으면 Early Stopping 활성화
+        if self.no_improvement_steps >= self.patience:
+            print(f"Early Stopping Triggered: {self.patience} Step 동안 Value Loss 개선 없음")
+            self.early_stop = True
+
+        return self.early_stop
+
+
 def train_daily_env(train_dataset, config):
     """
     Main function to train and evaluate the competitive MAPPO agents.
@@ -26,10 +66,16 @@ def train_daily_env(train_dataset, config):
 
     # Initialize environment
     env = Stock_Env(config)
-    early_stopping_reward = EarlyStopping(patience=config.patience, min_delta=0.0001)
+    # early_stopping_reward = EarlyStopping(patience=config.patience, min_delta=0.0001)
 
     print("학습 환경 및 에이전트 생성 완료")
     print("학습 시작")
+    print("학습 lr_actor 수:", env.lr_actor)
+    print("학습 lr_critic 길이:", env.lr_critic)
+    print("학습 entropy_weight 수:", env.entropy_weight)
+    print("학습 K_epochs 수:", env.K_epochs)
+
+
     # Initialize agents
     agent = MAPPO(env)
 
@@ -48,22 +94,24 @@ def train_daily_env(train_dataset, config):
 
 
     # Training loop
-    update_step = 0
+    # for epoch in tqdm(range(config.epochs + 1)):
 
-    for epoch in tqdm(range(config.epochs + 1)):
+# 매 epoch마다 메인 에피소드들 돌면서 학습
+    time_step = 1
+    logging_step = 1
+    early_stopping = EarlyStopping(patience=10, min_delta=0.0001)
 
-    # 매 epoch마다 메인 에피소드들 돌면서 학습
+    while time_step < env.max_step:
         state = env.reset()
-        global_time_step = 0  # 전체 타임스텝 카운트
+        # global_time_step = 0  # 전체 타임스텝 카운트
         # for main_episode in range(2):                  
         # state = env.window_slice() # 스테이트 짤림, day짤림, max_step 조정됨.
         state = state.permute(1, 2, 0)
         state = torch.tensor(state, dtype=torch.float32).to(config.device)
-                  
+                    
         total_sub_rewards = [[] for _ in range(env.num_agents)]
-        time_step = 0
         # sub_epoch_rewards = [0] * env.num_agents
-        for day_step in range(env.max_step):
+        for day_step in range(env.update_interval):
             actions = agent.select_actions(state)
             actions = torch.tensor(actions).cpu().numpy()
 
@@ -85,7 +133,6 @@ def train_daily_env(train_dataset, config):
                 #     "time_step": global_time_step})
             # sub_epoch_reward += np.mean(rewards)
             time_step += 1
-            global_time_step += 1
 
             # total_sub_reward.append(sub_epoch_reward) # 서브에피소드 별 보상 기록
             # 6) 일정 스텝마다 PPO 업데이트
@@ -98,20 +145,33 @@ def train_daily_env(train_dataset, config):
             if time_step % env.update_interval == 0:
                 
                 torch.set_grad_enabled(True)
-                agent_returns =  agent.all_update()
+                agent_returns, best_agent_loss =  agent.all_update(logging_step)
                 torch.set_grad_enabled(False)
-                
-                # 각 에이전트의 손실 기록
-                for i in range(env.num_agents):
+                logging_step += 1
+                # # 각 에이전트의 손실 기록
+                # for i in range(env.num_agents):
                     
-                    last_metrics = agent.agents[i].get_last_metrics()
-                    wandb.log({
-                        **{f"agent_{i}_{key}_per_sub_episode": value for key, value in last_metrics.items()},
-                        "time_step": update_step
-                    })
-                time_step = 0
-                update_step += 1
+                #     last_metrics = agent.agents[i].get_last_metrics()
+                #     wandb.log({
+                #         **{f"agent_{i}_{key}_per_sub_episode": value for key, value in last_metrics.items()},
+                #         "time_step": update_step
+                #     })
+                # update_step += 1
+                # ✅ Early Stopping 체크
+                if early_stopping.check_stop(best_agent_loss):
+                    print(f"🏆 Early Stopping Triggered at step {time_step}")
+                    wandb.log({"Early_Stopping": time_step})
+                    agent.save()
 
+                    return agent  # 학습 중단
+                
+            # 주기적으로 최고 성능 에이전트 모델 저장
+            if time_step % env.update_interval == 0:
+            # if epoch % 1 == 0:
+
+                agent.save()
+                print(f"Best agent model saved at time_step {time_step}")
+            
             if done:
                 break
             
@@ -136,8 +196,8 @@ def train_daily_env(train_dataset, config):
 
         
         # 최고 성능 에이전트의 보상으로 early stopping 체크
-        best_reward = max(agent_returns) # 에이전트 중 가장 높은 보상
-        early_stopping_reward(best_reward)
+        # best_reward = max(agent_returns) # 에이전트 중 가장 높은 보상
+        # early_stopping_reward(best_reward)
 
             
         # avg_main_episode_reward = np.mean([np.mean(x) for x in main_episode_rewards]) # 전체 에이전트의 평균 보상
@@ -145,10 +205,10 @@ def train_daily_env(train_dataset, config):
         
         # early_stopping_reward(avg_main_episode_reward)
         
-        if early_stopping_reward.early_stop:
-            print(f"Early stopping triggered by reward at epoch {epoch}. "
-                  f"Best Reward: {best_reward:.2f}")
-            break
+        # if early_stopping_reward.early_stop:
+        #     print(f"Early stopping triggered by reward at epoch {epoch}. "
+        #           f"Best Reward: {best_reward:.2f}")
+        #     break
 
         # # 주기적으로 로그 출력
         # if epoch % config.log_interval == 0:
@@ -158,11 +218,11 @@ def train_daily_env(train_dataset, config):
         #     print(f"Best Agent: {agent.best_agent_idx}, Best Reward: {best_reward:.2f}")
 
         # 주기적으로 최고 성능 에이전트 모델 저장
-        if epoch % 10 == 0:
+        if time_step % 200 == 0:
         # if epoch % 1 == 0:
 
             agent.save()
-            print(f"Best agent model saved at epoch {epoch}")
+            print(f"Best agent model saved at time_step {time_step}")
     agent.save()
     
     return agent
@@ -232,20 +292,27 @@ def eval_env(env, agent):
     agent.policy.eval()         # 평가 모드 전환
     agent.policy_old.eval()     # (필요하다면) old policy도 평가 모드로
     attn_li = []
+    empty_df = pd.DataFrame()
+
+    all_weight_df = pd.DataFrame()
+    
+    asset_weight_df = pd.DataFrame()
+    
     for _ in range(env.max_step):
         state = state.permute(1, 2, 0)
         state = torch.tensor(state, dtype=torch.float32).to(env.device)
         with torch.no_grad():
             action, attn_score = agent.select_action(state,  deterministic=True)
             attn_li.append(attn_score)
-        next_state, rewards, done, n_rewards,  all_weight_invest_rewards, asset_weight_dict, top3_action = env.eval_step(action)
+        next_state, rewards, done, n_rewards,  all_weight_invest_rewards, asset_weight_dict, top3_action, empty_df, all_weight_df, asset_weight_df = env.eval_step(action, empty_df, all_weight_df, asset_weight_df)
         asset_weight_li.append(asset_weight_dict)
         top3_action_li.append(top3_action)
         state = torch.tensor(next_state, dtype=torch.float32).to(env.device)
         # rewards.append(reward_dict["return"])
         if done:
             break
-    return rewards, n_rewards, all_weight_invest_rewards, asset_weight_li, top3_action_li, attn_li
+        
+    return rewards, n_rewards, all_weight_invest_rewards, asset_weight_li, top3_action_li, attn_li, empty_df, all_weight_df, asset_weight_df
 
 
 if __name__ == "__main__":

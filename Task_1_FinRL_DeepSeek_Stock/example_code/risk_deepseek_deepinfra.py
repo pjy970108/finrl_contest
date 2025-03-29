@@ -150,7 +150,7 @@ def process_csv(input_csv_path, output_csv_path, batch_size=5, chunk_size=1000):
 
 if __name__ == "__main__":
     model_path = "base_line_model/Task_1_FinRL_DeepSeek_Stock/data/"
-    input_file_name='nasdaq_exteral_data.csv'
+    input_file_name='nasdaq_news_data.csv'
     input_file = model_path + input_file_name
     output_file= model_used + '_' + input_file_name
     process_csv(input_file, output_file, batch_size=4)

@@ -8,9 +8,10 @@ import TARN_PPO.backtesting as backtest
 import torch
 import copy 
 import random
+import pandas as pd
 class EnvConfig:
     # def __init__(self, states, real_df, real_numpy_data, hyperparameters):
-    def __init__(self, states, real_df, hyperparameters):
+    def __init__(self, states, real_df, hyperparameters, trajectory_length = "1y"):
 
         self.env_name = "Portfolio Allocation"
         # self.window_size = 22
@@ -24,30 +25,34 @@ class EnvConfig:
         self.epochs = 1000
         # self.log_interval = 10
         self.update_interval = 10 # 10개의 샘플로 비교함
-        self.asset_weight_dict = {tick : 0 for tick in self.real_data.TICKER.unique()}
-        self.n_weight_dict = {tick : 0 for tick in self.real_data.TICKER.unique()}
+        self.asset_weight_dict = {tick : 0 for tick in self.real_data.tic.unique()}
+        self.n_weight_dict = {tick : 0 for tick in self.real_data.tic.unique()}
 
         self.reward_cond = "combined"
-        self.dynamic_dict = {"GTAA5": dp.cal_gtaa_5, 
-            "GTAA_AG": dp.cal_gtaa_aggressive, 
-            "DM": dp.cal_DM, 
-            "CDM": dp.cal_CDM, 
+        self.dynamic_dict = {
+            "GTAA": dp.cal_gtaa, 
+            "DM": dp.cal_dm,  
             "PAA": dp.cal_paa, 
-            "VAA-G4": dp.cal_vaa_g4, 
-            "VAA-12": dp.cal_vaa_g12, 
             "DAA": dp.cal_daa,
-            "6040": dp.cal_strategy_60_40,
-            "9010": dp.cal_strategy_90_10}
+            "Sentiment": dp.cal_sentiment,
+            "risk": dp.cal_risk}
+        
+        if trajectory_length == "1y":
+            self.max_step = 252  # 1년 기준 (거래일)
+        elif trajectory_length == "6m":
+            self.max_step = 120  # 6개월 기준
+        elif trajectory_length == "3m":
+            self.max_step = 60   # 3개월 기준
 
 
         self.invest_money = 10000000
         self.n_weight_money = 10000000
         self.all_weight_invest_dict = {dm : 10000000 for dm in self.dynamic_dict.keys()}
-        self.all_weight_dict = {dm : {tick : 0 for tick in self.real_data.TICKER.unique()} for dm in list(self.dynamic_dict.keys())}
+        self.all_weight_dict = {dm : {tick : 0 for tick in self.real_data.tic.unique()} for dm in list(self.dynamic_dict.keys())}
 
         #self.state_dim = states.shape[1]
         self.action_dim = len(self.dynamic_dict)
-        self.feature_dim = self.states.shape[3]
+        self.asset_dim = self.states.shape[2]
         self.gamma = 0.999
         self.lr_actor = 3e-4        
         self.lr_critic = 1e-3  # Critic 학습률
@@ -68,7 +73,7 @@ class EnvConfig:
         self.entropy_weight = 0.01
 
 class Stock_Env(EnvConfig):
-    def __init__(self, config):
+    def __init__(self, config, eval=False):
         # 상속받은 EnvConfig 초기화
         # super().__init__(config.states, config.real_data, config.real_numpy_data, config.hyperparameters)
         super().__init__(config.states, config.real_data, config.hyperparameters)
@@ -89,16 +94,30 @@ class Stock_Env(EnvConfig):
         self.reward_cond = config.reward_cond
         self.K_epochs = config.K_epochs
         self.entropy_weight = config.entropy_weight
+        self.window_size = 20
 
         # 거래 비용 0.1% 설정 # daechage xiu
         self.epochs = config.epochs
         self.reward_cond = config.reward_cond
 
         # self.window_states = self.states[str(self.current_idx)]
-        self.days = list(self.real_data.index)
+        if eval:
+            self.days = list(self.real_data.index.unique())
+            self.max_step = config.real_data.index.nunique()
+        else:
+            self.max_step = config.max_step
+            self.days = self.days[:self.max_step]
+
+
+        # self.days = list(self.real_data.index.unique())
+        self.real_data = self.real_data.loc[self.days]
         # self.window_real_data = self.real_data.loc[self.days]
-        self.max_step = len(self.days)-1
-        self.update_interval = 1000
+        # self.real_data = config.real_data.loc[self.days]
+
+        # self.max_step = config.max_step
+        self.update_interval = self.max_step
+        # self.days = self.days[:self.max_step]
+
 
 
         self.save_path = config.save_path
@@ -120,7 +139,9 @@ class Stock_Env(EnvConfig):
         self.gamma_reward = 0.0
         self.invest_money = 10000000
         self.rewards.append(self.invest_money)
-        return self.window_states[self.idx]
+        self.asset_weight_dict = {tick : 0 for tick in self.real_data.tic.unique()}
+
+        return self.states[self.idx]
     
     def softmax(self, actions_weights, temperature):
         
@@ -132,7 +153,7 @@ class Stock_Env(EnvConfig):
     
     def top3_action(self, actions, temperature, select_action=False):
         # actions에서 상위 3개의 인덱스를 반환하는 함수
-        top3_action = self.softmax(actions, temperature)
+        # top3_action = self.softmax(actions, temperature)
         # print("softmax_top_3", top3_action)
         if select_action:
             top3_indices = np.argsort(top3_action)[-3:]
@@ -150,18 +171,18 @@ class Stock_Env(EnvConfig):
         top3 동적 자산배분 return을 구하는 코드입니다.
         """
         
-        real_data_day = self.window_real_data.loc[day]
-        future_days = list(self.days)[self.idx+1]
-        future_data = self.window_real_data.loc[future_days]
+        real_data_day = self.real_data.loc[day]
+        future_data = self.real_data.loc[self.next_day]
+
         before_asset_dict = copy.deepcopy(self.asset_weight_dict)
-        after_asset_dict = {tick : 0 for tick in self.real_data.TICKER.unique()}
+        after_asset_dict = {tick : 0 for tick in self.real_data.tic.unique()}
         for strategy, portfolio_weight in top3_action.items():
             after_asset_dict = self.dynamic_dict[strategy](real_data_day, after_asset_dict, portfolio_weight)
-        backtesting_investment = dp.calculate_rebalancing_investment(real_data_day, future_data, before_asset_dict, after_asset_dict, self.invest_money)
+        backtesting_investment, total_transaction_fee = dp.calculate_rebalancing_investment(real_data_day, future_data, before_asset_dict, after_asset_dict, self.invest_money)
         
         self.asset_weight_dict = after_asset_dict
         
-        return backtesting_investment
+        return backtesting_investment, total_transaction_fee
 
 
     def calculate_n_weight_action_return(self, n_weight, day):
@@ -169,36 +190,36 @@ class Stock_Env(EnvConfig):
         n_weight 동적 자산배분 return을 구하는 코드입니다.
         """
         
-        real_data_day = self.window_real_data.loc[day]
-        future_days = list(self.days)[self.idx+1]
-        future_data = self.window_real_data.loc[future_days]
+        real_data_day = self.real_data.loc[day]
+        future_data = self.real_data.loc[self.next_day]
+
         before_asset_dict = copy.deepcopy(self.n_weight_dict)
-        after_asset_dict = {tick : 0 for tick in self.real_data.TICKER.unique()}
+        after_asset_dict = {tick : 0 for tick in self.real_data.tic.unique()}
         for strategy, portfolio_weight in n_weight.items():
             after_asset_dict = self.dynamic_dict[strategy](real_data_day, after_asset_dict, portfolio_weight)
-        backtesting_investment = dp.calculate_rebalancing_investment(real_data_day, future_data, 
+        backtesting_investment, total_transaction_fee = dp.calculate_rebalancing_investment(real_data_day, future_data, 
                                                                      before_asset_dict, after_asset_dict, self.n_weight_money)
         
         self.n_weight_dict = after_asset_dict
         
-        return backtesting_investment
+        return backtesting_investment, total_transaction_fee
     
     
     def calculate_all_weight_action_return(self, all_weight, day):
         """
         all weight 동적 자산배분 return을 구하는 코드입니다.
         """
-        real_data_day = self.window_real_data.loc[day]
-        future_days = list(self.days)[self.idx+1]
-        future_data = self.window_real_data.loc[future_days]
+        real_data_day = self.real_data.loc[day]
+        # future_days = self.days[self.idx+self.window_size]
+        future_data = self.real_data.loc[self.next_day]
         
         # 전략과 가중치 나옴
         for strategy, portfolio_weight in all_weight.items():
             before_asset_dict = copy.deepcopy(self.all_weight_dict[strategy])
-            after_asset_dict = {tick : 0 for tick in self.real_data.TICKER.unique()}
+            after_asset_dict = {tick : 0 for tick in self.real_data.tic.unique()}
             after_asset_dict = self.dynamic_dict[strategy](real_data_day, after_asset_dict, portfolio_weight)
-            backtesting_investment = dp.calculate_rebalancing_investment(real_data_day, future_data, before_asset_dict, after_asset_dict, self.all_weight_invest_dict[strategy])
-            self.all_weight_invest_dict[strategy] = backtesting_investment
+            backtesting_investment, total_transaction_fee = dp.calculate_rebalancing_investment(real_data_day, future_data, before_asset_dict, after_asset_dict, self.all_weight_invest_dict[strategy])
+            self.all_weight_invest_dict[strategy] = total_transaction_fee
 
             self.all_weight_dict[strategy] = after_asset_dict
             
@@ -221,14 +242,14 @@ class Stock_Env(EnvConfig):
         return all_weight_dict
         
         
-    def window_slice(self):
-        self.window_states = self.states[str(self.current_idx)]
-        self.days = self.real_numpy_data[self.current_idx].keys()
-        self.max_step = len(self.days)-1
-        self.window_real_data = self.real_data.loc[self.days]
-        self.asset_weight_dict = {tick : 0 for tick in self.real_data.TICKER.unique()}
+    # def window_slice(self):
+    #     self.window_states = self.states[str(self.current_idx)]
+    #     self.days = self.real_numpy_data[self.current_idx].keys()
+    #     self.max_step = len(self.days)-1
+    #     self.window_real_data = self.real_data.loc[self.days]
+    #     self.asset_weight_dict = {tick : 0 for tick in self.real_data.TICKER.unique()}
 
-        return self.window_states[0]
+    #     return self.window_states[0]
         
     
     def step(self, actions):
@@ -239,7 +260,7 @@ class Stock_Env(EnvConfig):
         # state를 가져옴
         state = self.window_states[self.idx]
         top3_action = self.top3_action(actions, 2.0)
-        rebalance_investment = self.calculate_action_return(top3_action, day)
+        rebalance_investment, total_transaction_fee = self.calculate_action_return(top3_action, day)
         self.invest_money = rebalance_investment
         
         # asset_reward = sum(imp_dict.values())
@@ -276,9 +297,42 @@ class Stock_Env(EnvConfig):
             day = list(self.days)[self.idx]
             state = self.window_states[self.idx]
         return state, reward_dict[self.reward_cond], done, self.invest_money, reward_dict
+
+
+    def make_daily_invest_data(self, empty_df, asset_weight, invest_money, daily_data, total_transaction_fee,  day, next_day):
+        cash_weight = 1- sum(asset_weight.values())
+        invest_weight = sum(asset_weight.values())
+        invest_money = invest_money - total_transaction_fee
+        cash_money = invest_money * cash_weight
+        # invest_money_remain = invest_money * invest_weight
+        
+        daily_data_inx = self.real_data.loc[day:next_day]
+        # next_day = daily_data_inx.index.unique()[-2]
+        # daily_data_inx = self.real_data.loc[day:next_day]
+  
+        
+        save_data = pd.DataFrame(index = daily_data_inx.index.unique(), columns=["invest"]).fillna(0)
+        # print("after invest_money : ", invest_money_remain)
+        # print("cash_money : ", cash_money)
+        # print("total_invest_money : ", cash_money + invest_money_remain)
+        # print(daily_data.TICKER.nunique())
+        # print(len(asset_weight.keys()))
+        for tic, weight in asset_weight.items():
+            if weight == 0:
+                continue
+            imp = daily_data[daily_data["tic"] == tic]
+            daily_return = imp["close"].pct_change().fillna(0)
+            daily_return = daily_return.loc[day:next_day]
+            test = weight * (1+daily_return).cumprod() * invest_money
+            save_data["invest"] += test.values
+        save_data["invest"] += cash_money
+        # print(save_data)
+        empty_df = pd.concat([empty_df, save_data], axis=0)
+        return empty_df
     
-    
-    def eval_step(self, weights):
+
+
+    def eval_step(self, weights, empty_df, all_weight_df, n_weight_df):
         """test를 평가하는 함수입니다.
 
         Args:
@@ -297,32 +351,64 @@ class Stock_Env(EnvConfig):
         # set_seed(42)
         
         day = list(self.days)[self.idx]
-        print(day)
-        state = self.window_states[self.idx]
-        
+        # print(day)
+        state = self.states[self.idx]
+
+        if self.idx+self.window_size <= self.max_step:
+            self.next_day = self.days[self.idx+self.window_size-1]
+        else:
+            self.next_day = self.real_data.index.unique()[-1]  # 전체 데이터의 마지막 날짜
+        print(f"Day: {day} ~ {self.next_day}")      
+
         
         n_weight_dict = self.n_weight()
         all_weight_dict = self.all_weight()
+        print(weights)
+        top3_action = self.top3_action(weights, 1.0, select_action = False)
+        # print(top3_action_all)
+        # top3_action = self.top3_action(weights, 1.0, select_action = True)
+        print(top3_action)
+
+        daily_money = self.invest_money
         
-        top3_action = self.top3_action(weights, 1.0, select_action = True)
+        rebalance_investment_top3, total_transaction_fee = self.calculate_action_return(top3_action, day)
+        empty_df = self.make_daily_invest_data(empty_df, self.asset_weight_dict, daily_money, self.real_data, total_transaction_fee, day, self.next_day)
+
+        self.invest_money = empty_df.iloc[-1].values[0]
         
         
-        rebalance_investment_top3 = self.calculate_action_return(top3_action, day)
-        self.invest_money = rebalance_investment_top3
-        
-        
-        rebalance_investment_n_weight = self.calculate_n_weight_action_return(n_weight_dict, day)
-        self.n_weight_money = rebalance_investment_n_weight
-        
-        
+        daily_nweight_money = self.n_weight_money
+        rebalance_investment_n_weight, n_total_transaction_fee = self.calculate_n_weight_action_return(n_weight_dict, day)
+        n_weight_df = self.make_daily_invest_data(n_weight_df,  self.n_weight_dict, daily_nweight_money, self.real_data, n_total_transaction_fee, day, self.next_day)
+        # self.n_weight_money = rebalance_investment_n_weight
+        self.n_weight_money = n_weight_df.iloc[-1].values[0]
+        # 전략별 투자
+        all_invest_dict = self.all_weight_invest_dict.copy()
         rebalance_invest_all_weight = self.calculate_all_weight_action_return(all_weight_dict, day)
-        self.all_weight_invest_dict = rebalance_invest_all_weight
-        
 
     
                
+        dm_df = pd.DataFrame()
+        for dm, all_weight_asset in all_weight_dict.items():
+            imp_df = pd.DataFrame()
+
+            all_dm_money = all_invest_dict[dm] # 비중
+            strategy_asset_dict = self.all_weight_dict[dm] # 전략별 자산 비중
+            dm_fee = rebalance_invest_all_weight[dm]
+            # print(dm, strategy_asset_dict)
+            # print("all_dm_money", all_dm_money)
+            imp_df = self.make_daily_invest_data(imp_df, strategy_asset_dict, all_dm_money, self.real_data, dm_fee, day, self.next_day)
+            imp_df.columns = [f"{dm}"]
+            # print(dm_df)
+            dm_df = pd.concat([dm_df, imp_df], axis=1)
+        # print("dm_df")
+        # print(dm_df)
+        all_weight_df = pd.concat([all_weight_df, dm_df])
+        # print(self.all_weight_dict)
+        self.all_weight_invest_dict = all_weight_df.iloc[-1].to_dict()
         self.rewards.append(self.invest_money)
         self.n_rewards.append(self.n_weight_money)
+        
         
         for dm, all_weight_dict in self.all_weight_invest_dict.items():
             self.all_weight_invest_rewards[dm].append(all_weight_dict)
@@ -343,24 +429,68 @@ class Stock_Env(EnvConfig):
 
         
             
-        self.idx += 1
+        self.idx += self.window_size
         done = self.idx >= self.max_step
+
         # self.gamma_reward = (reward_dict[self.reward_cond])  + self.gamma * self.gamma_reward
         if done:
+            
             print("Episode Done")
             reward_li = self.rewards
             asset_weight_dict_li = self.asset_weight_dict
+            # print("Episode Done")
+            # day = list(self.days)[self.idx]
+            # self.next_day = self.real_data.index.unique()[-1]  # 전체 데이터의 마지막 날짜
+
+            # reward_li = self.rewards
+            # asset_weight_dict_li = self.asset_weight_dict
+            # rebalance_investment_top3, total_transaction_fee = self.calculate_action_return(top3_action, day)
+            # empty_df = self.make_daily_invest_data(empty_df, self.asset_weight_dict, daily_money, self.real_data, total_transaction_fee, day, self.next_day)
+
+            # self.invest_money = empty_df.iloc[-1].values[0]
+            # daily_nweight_money = self.n_weight_money
+            # rebalance_investment_n_weight, n_total_transaction_fee = self.calculate_n_weight_action_return(n_weight_dict, day)
+            # n_weight_df = self.make_daily_invest_data(n_weight_df,  self.n_weight_dict, daily_nweight_money, self.real_data, n_total_transaction_fee, day, self.next_day)
+            # # self.n_weight_money = rebalance_investment_n_weight
+            # self.n_weight_money = n_weight_df.iloc[-1].values[0]
+            # # 전략별 투자
+            # all_invest_dict = self.all_weight_invest_dict.copy()
+            # rebalance_invest_all_weight = self.calculate_all_weight_action_return(all_weight_dict, day)
+
+        
+                
+            # dm_df = pd.DataFrame()
+            # for dm, all_weight_asset in all_weight_dict.items():
+            #     imp_df = pd.DataFrame()
+
+            #     all_dm_money = all_invest_dict[dm] # 비중
+            #     strategy_asset_dict = self.all_weight_dict[dm] # 전략별 자산 비중
+            #     dm_fee = rebalance_invest_all_weight[dm]
+            #     # print(dm, strategy_asset_dict)
+            #     # print("all_dm_money", all_dm_money)
+            #     imp_df = self.make_daily_invest_data(imp_df, strategy_asset_dict, all_dm_money, self.real_data, dm_fee, day, self.next_day)
+            #     imp_df.columns = [f"{dm}"]
+            #     # print(dm_df)
+            #     dm_df = pd.concat([dm_df, imp_df], axis=1)
+            # # print("dm_df")
+            # # print(dm_df)
+            # all_weight_df = pd.concat([all_weight_df, dm_df])
+            # # print(self.all_weight_dict)
+            # self.all_weight_invest_dict = all_weight_df.iloc[-1].to_dict()
+            # self.rewards.append(self.invest_money)
+            # self.n_rewards.append(self.n_weight_money)
 
             self.reset()
-            return state, reward_li, done, self.n_rewards,  self.all_weight_invest_rewards, asset_weight_dict_li, top3_action
+            return state, reward_li, done, self.n_rewards,  self.all_weight_invest_rewards, asset_weight_dict_li, top3_action, empty_df, all_weight_df, n_weight_df
 
 
         else:
             # self.idx += 1
             day = list(self.days)[self.idx]
-            state = self.window_states[self.idx]
+            # self.days[self.idx+self.window_size-1]
+            state = self.states[self.idx]
 
-            return state, self.rewards, done, self.n_rewards,  self.all_weight_invest_rewards, self.asset_weight_dict, top3_action
+            return state, self.rewards, done, self.n_rewards,  self.all_weight_invest_rewards, self.asset_weight_dict, top3_action, empty_df, all_weight_df, n_weight_df
     
     
 if __name__ == "__main__":

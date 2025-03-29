@@ -6,10 +6,11 @@ import numpy as np
 import dynamic_portfolio as dp
 import TARN_PPO.backtesting as backtest
 import torch
-import copy 
+import copy
+import random 
 
 class EnvConfig:
-    def __init__(self, states, real_df, real_numpy_data, hyperparameters):
+    def __init__(self, states, real_df, real_numpy_data, hyperparameters, trajectory_length = "1y"):
         self.env_name = "Portfolio Allocation"
         # self.window_size = 22
         # self.rolling_step = 0
@@ -29,7 +30,16 @@ class EnvConfig:
             "GTAA": dp.cal_gtaa, 
             "DM": dp.cal_dm,  
             "PAA": dp.cal_paa, 
-            "DAA": dp.cal_daa}
+            "DAA": dp.cal_daa,
+            "Sentiment": dp.cal_sentiment,
+            "risk": dp.cal_risk}
+        
+        if trajectory_length == "1y":
+            self.update_interval = 252  # 1년 기준 (거래일)
+        elif trajectory_length == "6m":
+            self.update_interval = 120  # 6개월 기준
+        elif trajectory_length == "3m":
+            self.update_interval = 60   # 3개월 기준
 
         #self.state_dim = states.shape[1]
         self.action_dim = len(self.dynamic_dict)
@@ -61,8 +71,8 @@ class Stock_Env(EnvConfig):
         # self.window_states = self.states[str(self.current_idx)]
         self.days = list(config.real_numpy_data.keys())
         # self.window_real_data = config.real_data.loc[self.days]
-        self.max_step = len(self.days)-self.window_size
-        self.update_interval = len(self.days)-self.window_size
+        self.max_step = 1000000
+        self.update_interval = config.update_interval
         # self.update_interval = 10
 
         self.save_path = config.save_path
@@ -83,7 +93,7 @@ class Stock_Env(EnvConfig):
         self.reward_cond = config.reward_cond
         self.K_epochs = config.K_epochs
         self.entropy_weight = config.entropy_weight
-        self.epochs = config.epochs
+        # self.epochs = config.epochs
 
         # 자산/보상 관리 (에이전트마다 독립)
         self.rewards = [[config.invest_money] for _ in range(self.num_agents)]
@@ -97,7 +107,8 @@ class Stock_Env(EnvConfig):
         
     def reset(self):
         """에이전트 수만큼 초기 상태를 반환"""
-        self.idx = 0
+        self.idx = random.randint(0, len(self.days) - self.update_interval- self.window_size)
+        # self.idx = 1429
         # 투자금/weights 초기화
         self.rewards = [[10000000] for _ in range(self.num_agents)]
 
@@ -110,7 +121,7 @@ class Stock_Env(EnvConfig):
         self.gamma_reward = [0.0 for _ in range(self.num_agents)]
 
         # 첫 상태 obs: (n_agents, feature_dim) - 모든 에이전트가 같은 관측 공유
-        first_state = self.states[self.idx]   # shape (C, H, W)? or (feature_dim, ...)?
+        # first_state = self.states[self.idx]   # shape (C, H, W)? or (feature_dim, ...)?
         # # 필요하다면 reshape해서 [feature_dim] 형태로
         # # 예: (C,H,W) -> flatten -> (feature_dim,)
         # if len(first_state.shape) > 1:
@@ -122,7 +133,9 @@ class Stock_Env(EnvConfig):
         # 모든 에이전트에게 동일 관측
         # obs = np.tile(first_state.cpu().numpy(), (self.num_agents, 1))
         # obs_tensor = torch.tensor(obs, dtype=torch.float32).to(self.device)
-        return first_state  # shape: [n_agents, feature_dim]
+        self.current_step = 1  # 현재 `update_interval` 내에서 몇 번째 스텝인지 추적
+
+        return self.states[self.idx]  # shape: [n_agents, feature_dim]
 
 
     # def reset(self):
@@ -262,15 +275,21 @@ class Stock_Env(EnvConfig):
         day = self.days[self.idx]
         print(day)
         # state를 가져옴
-        print(self.days[self.idx+self.window_size])
+        try:
+            print(self.idx)
+                # print(self.days[self.idx+self.window_size])
+        except:
+            print("End of data")
         state = self.states[self.idx]
         reward_dict = [{} for _ in range(self.num_agents)]
 
         for i in range(self.num_agents):
             self.invest_money = self.invest_money_list[i]
             action_1d = actions[i]
+            print("action_1d", action_1d)
             top3_action = self.top3_action(action_1d, 2.0)
-            rebalance_investment = self.calculate_action_return(top3_action, day, i)
+            print(top3_action)
+            rebalance_investment, total_transaction_fee = self.calculate_action_return(top3_action, day, i)
             self.rewards[i].append(rebalance_investment)
             self.invest_money_list[i] = rebalance_investment
         # asset_reward = sum(imp_dict.values())
@@ -316,7 +335,13 @@ class Stock_Env(EnvConfig):
         #     self.gamma_reward[i] = adjusted_rewards[i] +self.gamma_reward[i]
         
         self.idx += 1
-        done = self.idx >= self.max_step
+
+
+        self.current_step += 1
+        # done = self.idx >= self.update_interval
+        # 127
+        done = self.current_step >= self.update_interval
+
 
         if done:
             print("Episode Done")

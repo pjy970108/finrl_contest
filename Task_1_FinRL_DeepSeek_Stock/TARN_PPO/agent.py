@@ -117,6 +117,8 @@ class PPO:
 
         # Loss function
         self.MseLoss = nn.MSELoss()
+        # self.huber_loss = nn.SmoothL1Loss()
+
 
 
     # 연속된 공간에서 행동의 표준 편차 설정함
@@ -167,7 +169,7 @@ class PPO:
 
 
     # 정책 업데이트 
-    def update(self):
+    def update(self, agent_idx):
         # Monte Carlo 방식으로 리턴 계산
         rewards = []
         discounted_reward = 0
@@ -186,8 +188,10 @@ class PPO:
             discounted_reward = self.buffer.rewards[i] + (self.gamma * discounted_reward)
             rewards.insert(0, discounted_reward)
         # Normalizing the rewards, 성능 향상을 위해 필요함.
-        rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
-        rewards_norm = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
+        # rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
+        
+        rewards_norm = (torch.stack(rewards) - torch.stack(rewards).mean()) / (torch.stack(rewards).std() + 1e-7)
+        print("rewards_norm mean/std:", rewards_norm.mean(), rewards_norm.std())
 
         # # 표준편차가 0인지 확인
         # if torch.isnan(rewards.std()) or rewards.std() == 0:
@@ -199,10 +203,10 @@ class PPO:
 
         # convert list to tensor
         # 버퍼의 데이터 변환 및 분리 - 버퍼에 저장된 상태, 행동, 로그 확률, 상태 가치를 텐서로 변환하고 detach를 사용해 경사 계산에서 제외함.
-        old_states = torch.squeeze(torch.stack(self.buffer.states, dim=0)).to(self.device)
-        old_actions = torch.squeeze(torch.stack(self.buffer.actions, dim=0)).to(self.device)
-        old_logprobs = torch.squeeze(torch.stack(self.buffer.logprobs, dim=0)).detach().to(self.device)
-        old_state_values = torch.squeeze(torch.stack(self.buffer.state_values, dim=0)).to(self.device)
+        old_states = torch.squeeze(torch.stack(self.buffer.states, dim=0))
+        old_actions = torch.squeeze(torch.stack(self.buffer.actions, dim=0))
+        old_logprobs = torch.squeeze(torch.stack(self.buffer.logprobs, dim=0)).detach()
+        old_state_values = torch.squeeze(torch.stack(self.buffer.state_values, dim=0))
         # calculate advantages 정규화된 리턴에서 상태 가치를 뺀값임.
         # 각상태에서 행동이 얼마나 좋은지 나타냄.
         # advantages = rewards - old_state_values # 200일간의 advantage 계산
@@ -214,14 +218,19 @@ class PPO:
         # total_value_loss = 0
         # total_entropy_bonus = 0
         ffc_params_before = {name: param.clone().detach() for name, param in self.policy.ffc.named_parameters()}
-
+        total_policy_loss = 0
+        total_value_loss = 0
+        total_entropy_bonus = 0
         for _ in range(self.K_epochs):
             
             
             # Evaluating old actions and values
             # 이전 state와 action으로 로그 확률, 상태 가치, 분포의 엔트로피 계산함.
             logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
-
+            print("=== Critic Output Check ===")
+            print("state_values (raw):", state_values[:5].view(-1))  # 5개만
+            print("state_values mean/std:", state_values.mean().item(), state_values.std().item())
+            print("===========================")
             # match state_values tensor dimensions with rewards tensor
             # 상태 가치 텐서를 정리함.
             state_values = torch.squeeze(state_values)
@@ -232,10 +241,7 @@ class PPO:
 
             # ratios = action / old_actions # 200step의 행동의 ratio
             ratios = torch.exp(logprobs - old_logprobs.detach())
-
-            # advantages = advantages.unsqueeze(1)  # (200,) -> (200, 1)
-            # advantages = advantages.squeeze(1)
-            # advantages = advantages.expand(-1, ratios.shape[1])  # (200, 1) -> (200, 8)
+            # print("ratios: ", ratios)
 
             # Finding Surrogate Loss
             # surr1 : 클리핑되지 않은 손실함수
@@ -248,9 +254,18 @@ class PPO:
             # loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, rewards) - 0.01 * dist_entropy
             # clipping 적용 
             
-            policy_loss = torch.min(surr1, surr2).mean()
+            #policy_loss = torch.min(surr1, surr2).mean()
+            policy_loss = torch.min(surr1, surr2)
+            # print("policy_loss: ", policy_loss)
+
             value_loss = 0.5 * self.MseLoss(state_values, rewards_norm)
-            entropy_bonus = dist_entropy.mean()
+            # value_loss = 0.5 * self.huber_loss(state_values, rewards_norm)
+
+            # print("State_values: ", state_values)
+            # print("rewards: ", rewards_norm)
+            # print("value_loss: ", value_loss)
+            
+            entropy_bonus = dist_entropy
             loss = -policy_loss + value_loss - self.entropy_weight * entropy_bonus
             # loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, rewards) - 0.01 * dist_entropy
             # if value_loss > 10:
@@ -260,7 +275,16 @@ class PPO:
             #     print("policy_loss: ", policy_loss)
             # take gradient step
             self.optimizer.zero_grad()
-            loss.backward()
+            loss.mean().backward()
+            for name, param in self.policy.critic.named_parameters():
+                print(f"{name} grad norm: {None if param.grad is None else param.grad.norm()}")
+            # torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
+
+            self.optimizer.step()
+            total_policy_loss += policy_loss.mean()
+            total_value_loss += value_loss.item()
+            print("value_loss: ", value_loss.mean())
+            total_entropy_bonus += entropy_bonus.mean()
             # # # **여기서 파라미터와 그래디언트 확인**
             # for name, param in self.policy.named_parameters():
             #     if param.grad is not None:
@@ -271,41 +295,43 @@ class PPO:
 
 
             self.optimizer.step()
+            # ✅ Step 단위로 Loss 로깅
             # wandb.log({
-            #     "policy_loss": policy_loss,
-            #     "value_loss": value_loss,
-            #     "entropy_bonus": entropy_bonus,
-            #     "total_loss": loss.item()
-            # })       
-        # ffc_params_after = {name: param.clone().detach() for name, param in self.policy.ffc.named_parameters()}
-        # 변화 확인
-        # for name in ffc_params_before:
-        #     if not torch.equal(ffc_params_before[name], ffc_params_after[name]):
-        #         print(f"{name} 파라미터 변경됨!")
-        #     else:
-        #         print(f"{name} 변화 없음!")
-        #     # Accumulate losses for logging
-        #     total_policy_loss += policy_loss.item()
-        #     total_value_loss += value_loss.item()
-        #     total_entropy_bonus += entropy_bonus.item()
-        # # Log losses
-        # wandb.log({
-        #     "policy_loss": total_policy_loss / self.K_epochs,
-        #     "value_loss": total_value_loss / self.K_epochs,
-        #     "entropy_bonus": total_entropy_bonus / self.K_epochs,
-        #     "total_loss": loss.mean().item()
-        # })
-        self.last_loss = loss.item()
+            #     f"Agent_{agent_idx}/Policy_Loss_Step": policy_loss.item(),
+            #     f"Agent_{agent_idx}/Value_Loss_Step": value_loss.item(),
+            #     f"Agent_{agent_idx}/Entropy_Bonus_Step": entropy_bonus.item(),
+            #     f"Agent_{agent_idx}/Total_Loss_Step": loss.item(),
+            #     "Step": global_step  # 글로벌 Step을 기준으로 로그 저장
+            # })
+            # global_step += 1
+        
+        avg_policy_loss = total_policy_loss / self.K_epochs
+        
+        avg_value_loss = total_value_loss / self.K_epochs
+        print("avg_value_loss: ", avg_value_loss)
+        avg_entropy_bonus = total_entropy_bonus / self.K_epochs
+        avg_total_loss = avg_policy_loss + avg_value_loss - self.entropy_weight * avg_entropy_bonus
+        torch.stack(self.buffer.rewards)
+        self.last_loss = avg_total_loss
         # self.last_entropy = total_entropy_bonus / self.K_epochs
-            
+        total_raw_reward = torch.stack(self.buffer.rewards).sum().item()  # ← 이게 현실적 평가
+
         # Copy new weights into old policy
         # 새로운 정책 가중치를 policy old에 복사함
         self.policy_old.load_state_dict(self.policy.state_dict())
 
         # clear buffer
         # 버퍼 초기화
+        
         self.buffer.clear()
-        return rewards
+        
+        return total_raw_reward, {
+            "policy_loss": avg_policy_loss,
+            "value_loss": avg_value_loss,
+            "entropy_bonus": avg_entropy_bonus,
+            "total_loss": avg_total_loss,
+            "total_reward": total_raw_reward  # ✅ 여기 추가
+        }
 
     def save(self):
         # 모델 저장
@@ -347,5 +373,3 @@ if __name__ == "__main__":
     env = copy.deepcopy(Stock_Env(train_tensor, train_dataset, 22))
     
     agent = PPO(config)
-
-    

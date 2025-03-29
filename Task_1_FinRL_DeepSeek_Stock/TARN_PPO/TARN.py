@@ -11,11 +11,14 @@ class DCCLayer(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding, dilation, dropout_rate):
         super(DCCLayer, self).__init__()
         self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding, dilation=dilation)
+        self.bn = nn.BatchNorm1d(out_channels)  # 추가됨
+
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout_rate)
 
     def forward(self, x):
         x = self.conv(x)
+        x = self.bn(x)           
         x = self.relu(x)
         x = self.dropout(x)
         return x
@@ -26,6 +29,9 @@ class SACLayer(nn.Module):
         self.attention = nn.MultiheadAttention(embed_dim=in_channels, num_heads=head_num, batch_first=True)
         self.scale = nn.Parameter(torch.ones(1) * scale_size)
         self.conv = nn.Conv1d(in_channels, in_channels, kernel_size=1)
+        self.bn = nn.BatchNorm1d(in_channels)  # ✅ 추가
+        self.relu = nn.ReLU()
+
         self.dropout = nn.Dropout(dropout_rate)
         self.attn_weights = None
 
@@ -36,6 +42,8 @@ class SACLayer(nn.Module):
 
         attn_output = attn_output.transpose(1, 2)  # Reshape back
         attn_output = self.conv(attn_output)
+        attn_output = self.bn(attn_output)         # ✅ 추가
+        attn_output = self.relu(attn_output)
         attn_output = self.dropout(attn_output)
         return x + attn_output * self.scale
 
